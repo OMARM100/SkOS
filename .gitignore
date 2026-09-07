@@ -1,0 +1,12 @@
+# SkOS build artifacts
+build/*
+!build/.gitkeep
+*.o
+*.bin
+*.img
+*.iso
+*.elf
+*.map
+*.log
+compile_commands.json
+.vscode/
