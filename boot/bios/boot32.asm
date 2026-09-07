@@ -1,9 +1,9 @@
 ; SkOS BIOS bootstrap - stage 2
 ; 32-bit protected-mode entry point.
-; Entered by boot16 after the stage-2 image has been loaded at 0x8000.
 ;
-; The 16 -> 32 transition is intentionally isolated in this file so the
-; protected-mode implementation can evolve without touching stage 1.
+; Entered by boot16 at physical address 0x8000.
+; This stage owns the 16 -> 32 transition and provides a deterministic
+; protected-mode environment for the next boot milestone.
 
 BITS 16
 ORG 0x8000
@@ -13,11 +13,20 @@ ORG 0x8000
 
 stage2_start:
     cli
+    cld
 
-    ; Disable legacy NMI while changing descriptor state.
-    in al, 0x70
-    or al, 0x80
-    out 0x70, al
+    ; Start with known real-mode segment state.
+    xor ax, ax
+    mov ds, ax
+    mov es, ax
+    mov ss, ax
+    mov sp, 0x7C00
+
+    ; Enable A20 using the fast system-control port supported by QEMU.
+    in al, 0x92
+    or al, 0x02
+    and al, 0xFE
+    out 0x92, al
 
     lgdt [gdt_descriptor]
 
@@ -39,8 +48,8 @@ protected_mode_entry:
 
     mov esp, 0x90000
 
-    ; Development marker. A real implementation will replace this with
-    ; hardware-independent boot services and then the 64-bit transition.
+    ; Temporary diagnostic only. Later milestones replace this with
+    ; architecture-independent boot services and the 64-bit transition.
     mov esi, msg_stage2
     call print_string_32
 
@@ -50,7 +59,6 @@ protected_mode_entry:
     jmp .halt
 
 print_string_32:
-    ; VGA text memory is used only as a temporary BIOS-stage diagnostic.
     mov edi, 0xB8000
     mov ah, 0x07
 .next:
@@ -77,3 +85,7 @@ gdt_descriptor:
     dd GDT_START
 
 msg_stage2 db 'SkOS boot32: protected mode entered', 0
+
+; Stage 1 reserves exactly 32 sectors for this stage.
+; Fail the build if stage 2 ever outgrows the reserved region.
+times 16384-($-$$) db 0
