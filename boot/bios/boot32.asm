@@ -5,7 +5,7 @@
 bits 16
 org 0x8000
 
-%include "../include/boot_protocol.inc"
+%include "boot/include/boot_protocol.inc"
 
 %define BOOT_SECTOR_PHYS        0x00007C00
 %define MANIFEST_PHYS           (BOOT_SECTOR_PHYS + BOOT_MANIFEST_OFFSET)
@@ -41,7 +41,6 @@ start:
     cmp word [MANIFEST_PHYS + 6], BOOT_MANIFEST_SIZE
     jb manifest_error_rm
 
-    ; Kernel staging is limited to 0x20000..0x9FFFF.
     mov eax, dword [MANIFEST_PHYS + MANIFEST_KERNEL_SECTORS]
     mov edx, dword [MANIFEST_PHYS + MANIFEST_KERNEL_SECTORS + 4]
     test edx, edx
@@ -60,7 +59,6 @@ start:
     jz kernel_missing_rm
     mov [kernel_bytes_runtime], eax
 
-    ; This BIOS loader supports physical addresses below 4 GiB.
     mov eax, dword [MANIFEST_PHYS + MANIFEST_KERNEL_LOAD]
     mov edx, dword [MANIFEST_PHYS + MANIFEST_KERNEL_LOAD + 4]
     test edx, edx
@@ -75,13 +73,11 @@ start:
     jnz invalid_layout_rm
     mov [kernel_entry], eax
 
-    ; Validate bytes against the number of sectors allocated on disk.
     mov eax, [kernel_sectors_remaining]
     shl eax, 9
     cmp [kernel_bytes_runtime], eax
     ja invalid_layout_rm
 
-    ; Keep the loaded image inside the bootstrap identity-map limit.
     mov eax, [kernel_load_phys]
     add eax, [kernel_bytes_runtime]
     jc invalid_layout_rm
@@ -89,15 +85,12 @@ start:
     ja invalid_layout_rm
     mov [kernel_end_phys], eax
 
-    ; The entry point must be inside the loaded image.
     mov eax, [kernel_entry]
     cmp eax, [kernel_load_phys]
     jb invalid_layout_rm
     cmp eax, [kernel_end_phys]
     jae invalid_layout_rm
 
-    ; Load the kernel entirely in real mode. Each EDD transfer is <=127
-    ; sectors, and consecutive chunks occupy the low-memory staging window.
     mov eax, dword [MANIFEST_PHYS + MANIFEST_KERNEL_LBA]
     mov dword [kernel_dap + 8], eax
     mov eax, dword [MANIFEST_PHYS + MANIFEST_KERNEL_LBA + 4]
@@ -120,12 +113,10 @@ start:
     int 0x13
     jc disk_error_rm
 
-    ; Advance LBA by the number of sectors just read.
     movzx eax, word [kernel_dap + 2]
     add dword [kernel_dap + 8], eax
     adc dword [kernel_dap + 12], 0
 
-    ; Save the chunk count before converting it to paragraph count.
     mov edx, eax
     shl ax, 5
     add word [kernel_dap + 6], ax
@@ -167,7 +158,6 @@ protected_mode:
     cmp eax, dword [MANIFEST_PHYS + MANIFEST_KERNEL_CRC32]
     jne checksum_error
 
-    ; Clear PML4, PDPT, PD and BootInfo storage.
     mov edi, PML4_PHYS
     xor eax, eax
     mov ecx, 1024
@@ -177,7 +167,6 @@ protected_mode:
     mov ecx, BOOTINFO_SIZE / 4
     rep stosd
 
-    ; Identity map 0..kernel_end using 2 MiB pages.
     mov eax, [kernel_end_phys]
     add eax, TWO_MIB - 1
     jc invalid_layout
