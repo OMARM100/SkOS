@@ -1,4 +1,4 @@
-; SkOS BIOS stage 2: real mode -> protected mode -> long mode.
+; SkOS BIOS stage 2: real mode disk load -> protected mode -> long mode.
 ; Kernel metadata comes from the versioned boot manifest in sector 0.
 
 bits 16
@@ -20,7 +20,8 @@ org 0x8000
 %define PD_PHYS                 0x00092000
 %define STACK_PHYS              0x00088000
 
-bits 16
+; Stage 2 starts in real mode. Keep the BIOS disk operation here, before
+; entering protected mode, so there is only one CPU mode transition.
 start:
     cli
     xor ax, ax
@@ -29,6 +30,41 @@ start:
     mov ss, ax
     mov sp, 0x8800
     mov [boot_drive], dl
+
+    cmp dword [MANIFEST_PHYS], 0x4D424B53 ; "SKBM"
+    jne manifest_error_rm
+    cmp word [MANIFEST_PHYS + 4], 1
+    jne manifest_error_rm
+    cmp word [MANIFEST_PHYS + 6], 80
+    jb manifest_error_rm
+
+    mov ax, word [MANIFEST_KERNEL_SECTORS]
+    test ax, ax
+    jz kernel_missing_rm
+    cmp ax, 127
+    ja kernel_too_large_rm
+    mov word [kernel_dap + 2], ax
+
+    mov eax, dword [MANIFEST_KERNEL_LBA]
+    mov dword [kernel_dap + 8], eax
+    mov eax, dword [MANIFEST_KERNEL_LBA + 4]
+    mov dword [kernel_dap + 12], eax
+
+    mov si, kernel_dap
+    mov dl, [boot_drive]
+    mov ah, 0x42
+    int 0x13
+    jc disk_error_rm
+
+    ; Cache the build-selected 64-bit kernel destination and entry point.
+    mov eax, dword [MANIFEST_KERNEL_LOAD]
+    mov dword [kernel_load_phys], eax
+    mov eax, dword [MANIFEST_KERNEL_LOAD + 4]
+    mov dword [kernel_load_phys + 4], eax
+    mov eax, dword [MANIFEST_KERNEL_ENTRY]
+    mov dword [kernel_entry], eax
+    mov eax, dword [MANIFEST_KERNEL_ENTRY + 4]
+    mov dword [kernel_entry + 4], eax
 
     ; Fast A20 gate. QEMU normally starts with A20 enabled, but the
     ; bootloader must not depend on firmware state before using >1 MiB.
@@ -45,73 +81,6 @@ start:
 
 bits 32
 protected_mode:
-    mov ax, 0x10
-    mov ds, ax
-    mov es, ax
-    mov ss, ax
-    mov fs, ax
-    mov gs, ax
-    mov esp, STACK_PHYS
-
-    ; The build system owns the kernel layout. Consume the values patched
-    ; into the manifest instead of duplicating them in the bootloader.
-    cmp dword [MANIFEST_PHYS], 0x4D424B53 ; "SKBM"
-    jne manifest_error
-    cmp word [MANIFEST_PHYS + 4], 1
-    jne manifest_error
-    cmp word [MANIFEST_PHYS + 6], 80
-    jb manifest_error
-
-    mov eax, dword [MANIFEST_KERNEL_SECTORS]
-    test eax, eax
-    jz kernel_missing
-    cmp eax, 127
-    ja kernel_too_large
-
-    ; Cache the build-selected 64-bit kernel destination and entry point.
-    mov eax, dword [MANIFEST_KERNEL_LOAD]
-    mov dword [kernel_load_phys], eax
-    mov eax, dword [MANIFEST_KERNEL_LOAD + 4]
-    mov dword [kernel_load_phys + 4], eax
-    mov eax, dword [MANIFEST_KERNEL_ENTRY]
-    mov dword [kernel_entry], eax
-    mov eax, dword [MANIFEST_KERNEL_ENTRY + 4]
-    mov dword [kernel_entry + 4], eax
-
-    ; Build the kernel EDD packet. BIOS reads require real mode.
-    mov eax, dword [MANIFEST_KERNEL_LBA]
-    mov dword [kernel_dap + 8], eax
-    mov eax, dword [MANIFEST_KERNEL_LBA + 4]
-    mov dword [kernel_dap + 12], eax
-    mov ax, word [MANIFEST_KERNEL_SECTORS]
-    mov word [kernel_dap + 2], ax
-
-    mov eax, cr0
-    and eax, 0xFFFFFFFE
-    mov cr0, eax
-    jmp 0x0000:realmode_kernel_read
-
-bits 16
-realmode_kernel_read:
-    xor ax, ax
-    mov ds, ax
-    mov es, ax
-    mov ss, ax
-    mov sp, 0x8800
-    mov dl, [boot_drive]
-    mov si, kernel_dap
-    mov ah, 0x42
-    int 0x13
-    jc disk_error
-
-    cli
-    mov eax, cr0
-    or eax, 1
-    mov cr0, eax
-    jmp 0x08:kernel_copy
-
-bits 32
-kernel_copy:
     mov ax, 0x10
     mov ds, ax
     mov es, ax
@@ -259,6 +228,36 @@ msg_no_kernel db 'SkOS: kernel not present', 0
 msg_kernel_large db 'SkOS: kernel too large', 0
 msg_checksum db 'SkOS: kernel checksum error', 0
 
+; Real-mode error path used before protected mode is entered.
+print_error_rm:
+    mov ax, 0xB800
+    mov es, ax
+    xor di, di
+    mov ah, 0x07
+.print:
+    lodsb
+    test al, al
+    jz .halt
+    stosw
+    jmp .print
+.halt:
+    cli
+    hlt
+    jmp .halt
+
+manifest_error_rm:
+    mov si, msg_manifest
+    jmp print_error_rm
+kernel_missing_rm:
+    mov si, msg_no_kernel
+    jmp print_error_rm
+kernel_too_large_rm:
+    mov si, msg_kernel_large
+    jmp print_error_rm
+disk_error_rm:
+    mov si, msg_disk
+    jmp print_error_rm
+
 bits 32
 print_error:
     mov edi, 0xB8000
@@ -288,6 +287,7 @@ kernel_too_large:
 checksum_error:
     mov esi, msg_checksum
     jmp print_error
+
 disk_error:
     mov esi, msg_disk
     jmp print_error
