@@ -5,13 +5,11 @@
 bits 16
 org 0x8000
 
-%include "boot/include/boot_protocol.inc"
+%include "../include/boot_protocol.inc"
 
 %define BOOT_SECTOR_PHYS        0x00007C00
 %define MANIFEST_PHYS           (BOOT_SECTOR_PHYS + BOOT_MANIFEST_OFFSET)
 
-; Bootloader-owned low memory.
-; Kernel staging is intentionally below 640 KiB so the BIOS DAP can reach it.
 %define KERNEL_STAGING_PHYS     0x00020000
 %define KERNEL_STAGING_LIMIT    0x000A0000
 %define MAX_KERNEL_SECTORS      ((KERNEL_STAGING_LIMIT - KERNEL_STAGING_PHYS) / 512)
@@ -23,7 +21,7 @@ org 0x8000
 %define BOOTINFO_PHYS           0x000A8000
 
 %define MAX_EDD_SECTORS         127
-%define MAX_IDENTITY_PHYS       0x40000000 ; 1 GiB, covered by one PD
+%define MAX_IDENTITY_PHYS       0x40000000
 %define TWO_MIB                 0x00200000
 
 start:
@@ -36,7 +34,6 @@ start:
     cld
     mov [boot_drive], dl
 
-    ; Validate the common manifest first.
     cmp dword [MANIFEST_PHYS], BOOT_MANIFEST_MAGIC
     jne manifest_error_rm
     cmp word [MANIFEST_PHYS + 4], BOOT_MANIFEST_VERSION
@@ -44,7 +41,7 @@ start:
     cmp word [MANIFEST_PHYS + 6], BOOT_MANIFEST_SIZE
     jb manifest_error_rm
 
-    ; Kernel size/sectors are limited by our low-memory staging window.
+    ; Kernel staging is limited to 0x20000..0x9FFFF.
     mov eax, dword [MANIFEST_PHYS + MANIFEST_KERNEL_SECTORS]
     mov edx, dword [MANIFEST_PHYS + MANIFEST_KERNEL_SECTORS + 4]
     test edx, edx
@@ -63,8 +60,7 @@ start:
     jz kernel_missing_rm
     mov [kernel_bytes_runtime], eax
 
-    ; The first-stage manifest stores a 64-bit load address, but this BIOS
-    ; loader deliberately supports physical addresses below 4 GiB only.
+    ; This BIOS loader supports physical addresses below 4 GiB.
     mov eax, dword [MANIFEST_PHYS + MANIFEST_KERNEL_LOAD]
     mov edx, dword [MANIFEST_PHYS + MANIFEST_KERNEL_LOAD + 4]
     test edx, edx
@@ -79,14 +75,13 @@ start:
     jnz invalid_layout_rm
     mov [kernel_entry], eax
 
-    ; Check kernel_bytes <= kernel_sectors * 512.
+    ; Validate bytes against the number of sectors allocated on disk.
     mov eax, [kernel_sectors_remaining]
     shl eax, 9
     cmp [kernel_bytes_runtime], eax
     ja invalid_layout_rm
 
-    ; Check load + kernel_bytes without 32-bit wraparound and keep the whole
-    ; image inside the identity-mapped 1 GiB bootstrap address space.
+    ; Keep the loaded image inside the bootstrap identity-map limit.
     mov eax, [kernel_load_phys]
     add eax, [kernel_bytes_runtime]
     jc invalid_layout_rm
@@ -94,15 +89,15 @@ start:
     ja invalid_layout_rm
     mov [kernel_end_phys], eax
 
-    ; Entry must point inside the loaded image.
+    ; The entry point must be inside the loaded image.
     mov eax, [kernel_entry]
     cmp eax, [kernel_load_phys]
     jb invalid_layout_rm
     cmp eax, [kernel_end_phys]
     jae invalid_layout_rm
 
-    ; BIOS EDD disk reads happen entirely in real mode. The kernel is loaded
-    ; in <=127-sector chunks into consecutive low-memory staging buffers.
+    ; Load the kernel entirely in real mode. Each EDD transfer is <=127
+    ; sectors, and consecutive chunks occupy the low-memory staging window.
     mov eax, dword [MANIFEST_PHYS + MANIFEST_KERNEL_LBA]
     mov dword [kernel_dap + 8], eax
     mov eax, dword [MANIFEST_PHYS + MANIFEST_KERNEL_LBA + 4]
@@ -125,20 +120,19 @@ start:
     int 0x13
     jc disk_error_rm
 
-    ; Advance LBA by the chunk size.
+    ; Advance LBA by the number of sectors just read.
     movzx eax, word [kernel_dap + 2]
     add dword [kernel_dap + 8], eax
     adc dword [kernel_dap + 12], 0
 
-    ; 512 bytes = 32 paragraphs. Advance the DAP buffer segment accordingly.
+    ; Save the chunk count before converting it to paragraph count.
+    mov edx, eax
     shl ax, 5
     add word [kernel_dap + 6], ax
-
-    sub dword [kernel_sectors_remaining], eax
+    sub dword [kernel_sectors_remaining], edx
     jmp .load_chunk
 
 .disk_done:
-    ; Fast A20 gate. The kernel is loaded above 1 MiB.
     in al, 0x92
     or al, 0x02
     and al, 0xFE
@@ -161,13 +155,11 @@ protected_mode:
     mov esp, STACK_PHYS
     cld
 
-    ; Copy the complete staged image to its build-selected physical address.
     mov esi, KERNEL_STAGING_PHYS
     mov edi, [kernel_load_phys]
     mov ecx, [kernel_bytes_runtime]
     rep movsb
 
-    ; Validate the exact bytes that will be executed.
     push dword [kernel_bytes_runtime]
     push dword [kernel_load_phys]
     call crc32_buffer
@@ -175,16 +167,20 @@ protected_mode:
     cmp eax, dword [MANIFEST_PHYS + MANIFEST_KERNEL_CRC32]
     jne checksum_error
 
-    ; Clear the bootstrap page-table pages and BootInfo.
+    ; Clear PML4, PDPT, PD and BootInfo storage.
     mov edi, PML4_PHYS
     xor eax, eax
-    mov ecx, 4096
+    mov ecx, 1024
+    rep stosd
+    mov edi, BOOTINFO_PHYS
+    xor eax, eax
+    mov ecx, BOOTINFO_SIZE / 4
     rep stosd
 
-    ; Identity map from physical 0 through kernel_end using 2 MiB pages.
-    ; One PD is enough because the supported bootstrap range is 1 GiB.
+    ; Identity map 0..kernel_end using 2 MiB pages.
     mov eax, [kernel_end_phys]
     add eax, TWO_MIB - 1
+    jc invalid_layout
     shr eax, 21
     test eax, eax
     jz invalid_layout
@@ -203,15 +199,10 @@ protected_mode:
 .fill_pd:
     mov dword [edi], eax
     mov dword [edi + 4], 0
-    or dword [edi], 0x083 ; present | writable | 2 MiB page
+    or dword [edi], 0x083
     add eax, TWO_MIB
     add edi, 8
     loop .fill_pd
-
-    mov edi, BOOTINFO_PHYS
-    xor eax, eax
-    mov ecx, BOOTINFO_SIZE / 4
-    rep stosd
 
     mov dword [BOOTINFO_PHYS], BOOTINFO_MAGIC
     mov word [BOOTINFO_PHYS + 4], BOOTINFO_VERSION
@@ -230,20 +221,19 @@ protected_mode:
     mov eax, dword [MANIFEST_PHYS + MANIFEST_KERNEL_CRC32]
     mov dword [BOOTINFO_PHYS + 40], eax
 
-    ; Enter long mode.
     mov eax, cr4
-    or eax, 1 << 5             ; PAE
+    or eax, 1 << 5
     mov cr4, eax
 
-    mov ecx, 0xC0000080        ; EFER
+    mov ecx, 0xC0000080
     rdmsr
-    or eax, 1 << 8             ; LME
+    or eax, 1 << 8
     wrmsr
 
     mov eax, PML4_PHYS
     mov cr3, eax
     mov eax, cr0
-    or eax, (1 << 31) | 1      ; PG | PE
+    or eax, (1 << 31) | 1
     mov cr0, eax
 
     lgdt [gdt64_descriptor]
@@ -259,10 +249,9 @@ long_mode:
     mov gs, ax
     mov rsp, STACK_PHYS
 
-    ; Boot ABI: RDI = struct skos_bootinfo *.
     mov edi, BOOTINFO_PHYS
     mov eax, dword [kernel_entry]
-    test rax, rax
+    test eax, eax
     jz .halt
     jmp rax
 .halt:
@@ -307,11 +296,11 @@ crc32_buffer:
 bits 16
 kernel_sectors_remaining dd 0
 kernel_bytes_runtime     dd 0
-kernel_load_phys          dd 0
-kernel_entry              dd 0
-kernel_end_phys           dd 0
-identity_page_count       dd 0
-boot_drive                db 0
+kernel_load_phys         dd 0
+kernel_entry             dd 0
+kernel_end_phys          dd 0
+identity_page_count      dd 0
+boot_drive               db 0
 
 msg_disk db 'SkOS: kernel disk read error', 0
 msg_manifest db 'SkOS: invalid boot manifest', 0
