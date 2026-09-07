@@ -5,6 +5,7 @@ ENTRY(_start)
 SECTIONS
 {
     . = 0x00100000;
+    _kernel_start = .;
 
     .text : ALIGN(16)
     {
@@ -27,6 +28,8 @@ SECTIONS
         *(COMMON)
         *(.bss .bss.*)
     }
+
+    _kernel_end = .;
 
     /DISCARD/ :
     {
