@@ -26,6 +26,7 @@ BOOT_SIGNATURE_OFFSET = 510
 STAGE2_LBA = 1
 STAGE2_LOAD_ADDRESS = 0x8000
 MAX_SINGLE_EDD_READ_SECTORS = 127
+KERNEL_LOAD_PHYS = 0x00100000
 
 ROOT = Path(__file__).resolve().parents[1]
 BUILD = ROOT / "build"
@@ -39,6 +40,7 @@ KERNEL_LINKER = ROOT / "kernel" / "linker.ld"
 KERNEL_ELF = KERNEL_BUILD / "kernel.elf"
 KERNEL_BIN = KERNEL_BUILD / "kernel.bin"
 IMAGE = BIOS_BUILD / "skos-bios.img"
+QEMU_LOG = BIOS_BUILD / "qemu.log"
 
 
 def die(message: str) -> "NoReturn":
@@ -213,10 +215,7 @@ def patch_manifest(boot16: bytes, stage2: bytes, kernel: bytes | None, kernel_en
     kernel_sectors = sector_count(kernel_bytes) if kernel_bytes else 0
     kernel_lba = STAGE2_LBA + stage2_sectors if kernel_bytes else 0
 
-    # Kernel physical loading/entry metadata is reserved for the long-mode
-    # loader. Until that loader exists, keep the load target zero rather than
-    # pretending that the 32-bit stage can directly execute the kernel.
-    kernel_load_phys = 0
+    kernel_load_phys = KERNEL_LOAD_PHYS if kernel is not None else 0
     kernel_entry_value = kernel_entry or 0
     kernel_crc32 = zlib.crc32(kernel) & 0xFFFFFFFF if kernel is not None else 0
 
@@ -270,6 +269,7 @@ def build() -> None:
             f"  kernel:       {len(kernel)} bytes / {kernel_sectors} sectors "
             f"@ LBA {STAGE2_LBA + stage2_sectors}"
         )
+        print(f"  kernel load:  0x{KERNEL_LOAD_PHYS:016x}")
         print(f"  kernel entry: 0x{kernel_entry:016x}")
     else:
         print("  kernel:       not built (kernel/linker.ld not present yet)")
@@ -300,7 +300,18 @@ def run_qemu() -> None:
         build()
     qemu = os.environ.get("QEMU", "qemu-system-x86_64")
     require_tool(qemu)
-    run([qemu, "-drive", f"format=raw,file={IMAGE}"])
+    BIOS_BUILD.mkdir(parents=True, exist_ok=True)
+    run([
+        qemu,
+        "-drive",
+        f"format=raw,file={IMAGE}",
+        "-no-reboot",
+        "-no-shutdown",
+        "-d",
+        "guest_errors,cpu_reset",
+        "-D",
+        str(QEMU_LOG),
+    ])
 
 
 def main() -> None:
