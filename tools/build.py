@@ -359,7 +359,7 @@ def run_qemu() -> None:
         "-no-reboot",
         "-no-shutdown",
         "-d",
-        "guest_errors,cpu_reset",
+        "int,guest_errors,cpu_reset",
         "-D",
         str(QEMU_LOG),
     ])
