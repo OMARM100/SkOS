@@ -290,7 +290,9 @@ gdt64:
     dq 0x00CF9A000000FFFF
     dq 0x00CF92000000FFFF
     dq 0x00AF9A000000FFFF
-    dq 0x00AF92000000FFFF
+    ; Long-mode data segments must have L=0. Keep the normal 32-bit
+    ; data descriptor encoding and use it for DS/ES/SS/FS/GS in long mode.
+    dq 0x00CF92000000FFFF
 gdt64_end:
 gdt64_descriptor:
     dw gdt64_end - gdt64 - 1
