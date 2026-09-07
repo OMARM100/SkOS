@@ -58,8 +58,10 @@ protected_mode:
     ja kernel_too_large
 
     ; Build the kernel EDD packet. BIOS reads require real mode.
-    mov dword [kernel_dap + 8], dword [MANIFEST_KERNEL_LBA]
-    mov dword [kernel_dap + 12], dword [MANIFEST_KERNEL_LBA + 4]
+    mov eax, dword [MANIFEST_KERNEL_LBA]
+    mov dword [kernel_dap + 8], eax
+    mov eax, dword [MANIFEST_KERNEL_LBA + 4]
+    mov dword [kernel_dap + 12], eax
     mov ax, word [MANIFEST_KERNEL_SECTORS]
     mov word [kernel_dap + 2], ax
 
