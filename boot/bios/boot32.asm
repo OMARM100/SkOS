@@ -9,11 +9,11 @@ org 0x8000
 %define MANIFEST_KERNEL_LBA     (MANIFEST_PHYS + 0x20)
 %define MANIFEST_KERNEL_BYTES   (MANIFEST_PHYS + 0x28)
 %define MANIFEST_KERNEL_SECTORS (MANIFEST_PHYS + 0x30)
+%define MANIFEST_KERNEL_LOAD    (MANIFEST_PHYS + 0x38)
 %define MANIFEST_KERNEL_ENTRY   (MANIFEST_PHYS + 0x40)
 %define MANIFEST_KERNEL_CRC     (MANIFEST_PHYS + 0x48)
 
 %define KERNEL_STAGING_PHYS     0x00020000
-%define KERNEL_LOAD_PHYS        0x00100000
 %define BOOTINFO_PHYS           0x00093000
 %define PML4_PHYS               0x00090000
 %define PDPT_PHYS               0x00091000
@@ -53,16 +53,30 @@ protected_mode:
     mov gs, ax
     mov esp, STACK_PHYS
 
+    ; The build system owns the kernel layout. Consume the values patched
+    ; into the manifest instead of duplicating them in the bootloader.
     cmp dword [MANIFEST_PHYS], 0x4D424B53 ; "SKBM"
     jne manifest_error
     cmp word [MANIFEST_PHYS + 4], 1
     jne manifest_error
+    cmp word [MANIFEST_PHYS + 6], 80
+    jb manifest_error
 
     mov eax, dword [MANIFEST_KERNEL_SECTORS]
     test eax, eax
     jz kernel_missing
     cmp eax, 127
     ja kernel_too_large
+
+    ; Cache the build-selected 64-bit kernel destination and entry point.
+    mov eax, dword [MANIFEST_KERNEL_LOAD]
+    mov dword [kernel_load_phys], eax
+    mov eax, dword [MANIFEST_KERNEL_LOAD + 4]
+    mov dword [kernel_load_phys + 4], eax
+    mov eax, dword [MANIFEST_KERNEL_ENTRY]
+    mov dword [kernel_entry], eax
+    mov eax, dword [MANIFEST_KERNEL_ENTRY + 4]
+    mov dword [kernel_entry + 4], eax
 
     ; Build the kernel EDD packet. BIOS reads require real mode.
     mov eax, dword [MANIFEST_KERNEL_LBA]
@@ -107,7 +121,7 @@ kernel_copy:
     mov esp, STACK_PHYS
 
     mov esi, KERNEL_STAGING_PHYS
-    mov edi, KERNEL_LOAD_PHYS
+    mov edi, dword [kernel_load_phys]
     mov ecx, dword [MANIFEST_KERNEL_BYTES]
     test ecx, ecx
     jz kernel_missing
@@ -115,7 +129,7 @@ kernel_copy:
     rep movsb
 
     push dword [MANIFEST_KERNEL_BYTES]
-    push dword KERNEL_LOAD_PHYS
+    push dword [kernel_load_phys]
     call crc32_buffer
     add esp, 8
     cmp eax, dword [MANIFEST_KERNEL_CRC]
@@ -139,12 +153,13 @@ kernel_copy:
     mov dword [BOOTINFO_PHYS], 0x534B4249 ; "SKBI"
     mov word [BOOTINFO_PHYS + 4], 1
     mov word [BOOTINFO_PHYS + 6], 64
-    mov dword [BOOTINFO_PHYS + 8], KERNEL_LOAD_PHYS
+    mov eax, dword [kernel_load_phys]
+    mov dword [BOOTINFO_PHYS + 8], eax
     mov eax, dword [MANIFEST_KERNEL_BYTES]
     mov dword [BOOTINFO_PHYS + 12], eax
-    mov eax, dword [MANIFEST_KERNEL_ENTRY]
+    mov eax, dword [kernel_entry]
     mov dword [BOOTINFO_PHYS + 16], eax
-    mov eax, dword [MANIFEST_KERNEL_ENTRY + 4]
+    mov eax, dword [kernel_entry + 4]
     mov dword [BOOTINFO_PHYS + 20], eax
     mov dword [BOOTINFO_PHYS + 24], MANIFEST_PHYS
     mov eax, dword [MANIFEST_KERNEL_CRC]
@@ -180,7 +195,7 @@ long_mode:
 
     ; Boot ABI: RDI points to the versioned BootInfo structure.
     mov rdi, BOOTINFO_PHYS
-    mov rax, qword [MANIFEST_KERNEL_ENTRY]
+    mov rax, qword [kernel_entry]
     test rax, rax
     jz .halt
     jmp rax
@@ -231,6 +246,10 @@ kernel_dap:
     dw KERNEL_STAGING_PHYS & 0x000F
     dw KERNEL_STAGING_PHYS >> 4
     dq 0
+
+; Runtime copies of the manifest's 64-bit destination and entry.
+kernel_load_phys dq 0
+kernel_entry     dq 0
 
 boot_drive db 0
 
