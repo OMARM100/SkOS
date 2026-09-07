@@ -4,7 +4,7 @@
 bits 16
 org 0x7C00
 
-%include "boot/include/boot_protocol.inc"
+%include "../include/boot_protocol.inc"
 
 %define BOOT_DRIVE_ADDRESS   0x7BFE
 %define STAGE2_LOAD_SEGMENT  0x0000
