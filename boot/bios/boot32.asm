@@ -30,6 +30,13 @@ start:
     mov sp, 0x8800
     mov [boot_drive], dl
 
+    ; Fast A20 gate. QEMU normally starts with A20 enabled, but the
+    ; bootloader must not depend on firmware state before using >1 MiB.
+    in al, 0x92
+    or al, 0x02
+    and al, 0xFE
+    out 0x92, al
+
     lgdt [gdt16_descriptor]
     mov eax, cr0
     or eax, 1
